@@ -1,32 +1,32 @@
-# 🏥 Medicare DME Fraud Detection — PU Learning Pipeline
+# Medicare DME Fraud Detection — ML Pipeline
 
-> Detecting fraudulent Durable Medical Equipment (DME) claims in Medicare using **Positive-Unlabeled (PU) Learning** — a machine learning approach designed for real-world fraud detection where confirmed fraud labels are scarce but reliable.
-
----
-
-## 🔍 Problem Statement
-
-Traditional supervised fraud detection requires a clean set of both positive (fraud) and negative (legitimate) labels. In practice, **we only have a small set of confirmed fraud claims** — the rest are unlabeled, not confirmed clean. Training a standard binary classifier on this data would introduce massive label noise.
-
-This project applies **PU Learning** to treat confirmed fraud as the positive class and all unlabeled claims as an unknown mixture, allowing the model to learn fraud patterns without assuming unlabeled = legitimate.
+> Detecting fraudulent Durable Medical Equipment (DME) claims in Medicare using machine learning. The project includes two modeling approaches: a **Positive-Unlabeled (PU) Learning** pipeline for settings where confirmed fraud labels are scarce, and a production-grade **LightGBM** classifier registered to MLflow.
 
 ---
 
-## 🏗️ Pipeline Architecture
+## Problem Statement
+
+Traditional supervised fraud detection requires a clean set of both positive (fraud) and negative (legitimate) labels. In practice, **we only have a small set of confirmed fraud claims** — the rest are unlabeled, not confirmed clean. Training a standard binary classifier on this data introduces massive label noise.
+
+This project addresses that challenge in two stages:
+
+1. **PU Learning** (`DME_TrainingData.ipynb` + `DME_PULearning.ipynb`) — treats confirmed fraud as reliable positives and all unlabeled claims as an unknown mixture, learning fraud patterns without assuming unlabeled = legitimate.
+2. **LightGBM production model** (`DME_Features_Pipeline.ipynb` + `DME_Model_Training_Pipeline.ipynb`) — trained on labeled data from BigQuery at scale using PySpark on Databricks, with MLflow model registry for production serving.
+
+---
+
+## Pipeline Architecture
 
 ```
-Medicare Claims Data (SQL Server)
+Medicare Claims Data
         │
-        ▼
-┌─────────────────────────────┐
-│   Data Extraction & Staging  │  ← CCLF6 Part B DME claims (2019–2025)
-│   temp_zeming.dbo.dme        │    Filtered to assigned beneficiaries
-└─────────────────────────────┘
+        ├── SQL Server (CCLF6 Part B, 2019–2025)        ← PU Learning pipeline
+        └── Google BigQuery (ML_DATASETS, 2021–2025)     ← LightGBM pipeline
         │
         ▼
 ┌─────────────────────────────────────────────────────┐
 │              Feature Engineering (5 Levels)          │
-│                                                       │
+│                                                      │
 │  • Claim Level        — amounts, CPT codes, dates    │
 │  • Beneficiary Level  — utilization history          │
 │  • Billing NPI Level  — provider behavior patterns   │
@@ -34,106 +34,82 @@ Medicare Claims Data (SQL Server)
 │  • NPI × Bene Level   — provider-patient concentration│
 └─────────────────────────────────────────────────────┘
         │
-        ▼
-┌─────────────────────────┐
-│   PU Learning Model      │
-│   (Positive-Unlabeled)   │
-└─────────────────────────┘
+        ├── PU Learning Model    (label-scarce setting)
+        └── LightGBM Classifier  (production, MLflow)
         │
         ▼
-   Fraud Risk Scores
+   Fraud Risk Scores  — P(fraud) ∈ [0, 1] per claim
 ```
 
 ---
 
-## ✨ Key Features
+## Feature Engineering
 
-### Multi-Level Feature Engineering
-Features are engineered at **5 levels** with **30 / 90 / 365 day lookback windows** to capture both short-term spikes and long-term behavioral patterns:
+Features are engineered at **5 levels** with **30 / 90 / 365-day lookback windows**:
 
 | Level | Key Signals |
 |---|---|
-| **Claim** | Charge amount, line count, CPT mix, claim duration, adjustment status |
+| **Claim** | Charge amount, line count, CPT mix, claim duration, adjustment status, high-risk HCPCS flag |
 | **Beneficiary** | DME utilization history, provider shopping behavior, days since last claim |
 | **Billing NPI** | Volume trends, patient concentration, high-risk CPT share, new patient rate |
 | **Ordering NPI** | Referral volume, top CPT patterns, new patient acquisition rate |
-| **NPI × Beneficiary** | What % of a provider's total volume is concentrated on a single patient |
+| **NPI × Beneficiary** | Repeat-relationship claim counts and paid amounts per provider-patient pair |
 
-### High-Risk CPT Flagging
-Claims containing HCPCS codes from a curated high-risk DME code list are flagged at both the claim and provider level.
-
-### Provider-Patient Visit Verification
-A cross-check against Part A and Part B claims verifies whether the **ordering provider has ever had a clinical encounter** with the patient — a strong fraud signal when no prior relationship exists (`bene_seen_ordnpi_5years`).
-
-### PU Learning
-Standard supervised learning assumes unlabeled = legitimate, which leads to a heavily contaminated negative class. PU Learning addresses this by:
-- Treating confirmed fraud claims as **reliable positives**
-- Treating all other claims as **unlabeled** (not negative)
-- Using a two-step approach to iteratively identify likely negatives and train the final classifier
+**Provider-patient visit verification:** Cross-checks Part A/B claims to verify whether the ordering provider ever had a clinical encounter with the patient (`bene_seen_ordnpi_5years`) — a strong fraud signal when absent.
 
 ---
 
-## 📁 Repository Structure
+## LightGBM Model Performance
+
+**Test set (fully out-of-time, time-based 70/15/15 split):**
+
+| Metric | Value |
+|---|---|
+| AUC | **0.9989** |
+| PR-AUC | **0.97** |
+| KS Statistic | **0.97** |
+
+**Top-K Recall — Audit Prioritization:**
+
+| Review % of Claims | Fraud Captured |
+|---|---|
+| Top 1% | 52% |
+| Top 3% | **98%** |
+| Top 5% | **99%** |
+
+> By auditing only the top 3% of highest-scored claims, the model surfaces **98% of all fraudulent cases**.
+
+---
+
+## Repository Structure
 
 ```
-├── DME_TrainingData.ipynb     # Feature engineering pipeline
-├── DME_PULearning.ipynb       # PU Learning model training
-├── data/
-│   ├── features_claim.csv
-│   ├── features_bene.csv
-│   ├── features_billnpi.csv
-│   ├── features_ordenpi.csv
-│   ├── features_billnpibene.csv
-│   ├── features_ordenpibene.csv
-│   └── raw_training_data.csv  # Final merged training dataset
+├── DME_TrainingData.ipynb             # Feature engineering (SQL Server / pandas)
+├── DME_PULearning.ipynb               # PU Learning model training
+├── DME_Features_Pipeline.ipynb        # Feature engineering at scale (PySpark / BigQuery)
+├── DME_Model_Training_Pipeline.ipynb  # LightGBM training + MLflow registry
+├── model_card.md                      # Model performance, limitations, versioning
 └── README.md
 ```
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Tool | Usage |
 |---|---|
-| **Python** (pandas, numpy) | Feature engineering & data processing |
-| **SQL Server + SQLAlchemy** | Data extraction and staging |
-| **T-SQL** | Complex lookback window aggregations |
-| **PU Learning** | Fraud model training under label scarcity |
+| Python (pandas, numpy) | Feature engineering & data processing |
+| PySpark | Distributed feature engineering on Databricks |
+| SQL Server + SQLAlchemy | Data extraction and staging (PU Learning pipeline) |
+| T-SQL | Complex lookback window aggregations |
+| Google BigQuery | Data warehouse for production pipeline |
+| LightGBM | Gradient-boosted classifier |
+| MLflow | Experiment tracking, model registry, production serving |
+| PU Learning | Fraud model training under label scarcity |
 
 ---
 
-## 💡 Why PU Learning?
+## Setup
 
-| Approach | Problem |
-|---|---|
-| Standard Binary Classifier | Treats unlabeled claims as clean — introduces massive label noise |
-| Anomaly Detection | Ignores known fraud patterns entirely |
-| **PU Learning** ✅ | Leverages confirmed fraud labels without assuming unlabeled = legitimate |
-
-In real-world healthcare fraud detection, **confirmed fraud cases represent only a fraction of actual fraud**. PU Learning is specifically designed for this setting, making it a more principled and realistic approach than standard supervised methods.
-
----
-
-## ⚙️ Setup
-
-### Prerequisites
-- Python 3.12+
-- Access to SQL Server (`_Internal_Reporting` database)
-- `pandas`, `sqlalchemy`, `pyodbc`
-
-### Credentials
-Create a `Credentials.txt` file with one value per line:
-```
-server_name
-database_name
-username
-password
-```
-
----
-
-## 📌 Notes
-- Claims data starts from **2019** to support 2-year lookback windows for 2021+ flagged claims
-- All lookback features use `clm_thru_dt` as the anchor date to prevent data leakage
-- Beneficiary population is restricted to **assigned members** (2021–2025)
-- Credentials are loaded from an external file and never hardcode
+See `model_card.md` for full model versioning, known limitations, and production usage details.
+Credentials are always loaded from external files or environment variables — never hardcoded.
